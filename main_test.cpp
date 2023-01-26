@@ -133,6 +133,7 @@ void PersistPositions(const std::string &p_strFilename, std::vector<Particle> &p
 
 int main(int argc, char **argv)
 {
+    double start_time = omp_get_wtime();
     int counter;
     bool enable_output = true;
     std::string input_file;
@@ -145,6 +146,20 @@ int main(int argc, char **argv)
 
     std::stringstream fileOutput;
     std::vector<Particle> bodies;
+
+    // Declare and initialise stuff
+    int numtasks, rank, rc;
+
+    // Initialise MPI environment
+    // Initialise MPI and check for errors
+    rc = MPI_Init(&argc, &argv);
+    if (rc != MPI_SUCCESS)
+    {
+        printf ("Error starting MPI program. Terminating.\n");
+        MPI_Abort(MPI_COMM_WORLD, rc);
+    }
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &numtasks);
 
     for(counter=0;counter<argc;counter++) {
         if(std::strcmp(argv[counter], "-o") == 0) {
@@ -201,6 +216,7 @@ int main(int argc, char **argv)
             while ((next = line.find(',', last)) != std::string::npos)
             {
                 std::__sso_string var = line.substr(last, next-last);
+                // printf("%s", var.c_str());
                 if(it == 0) {
                     mass = std::stof(var);
                 } else {
@@ -220,25 +236,19 @@ int main(int argc, char **argv)
     }
 
     printf("\nBody Size: %zu", bodies.size());
-
-    // Declare and initialise stuff
-    int numtasks, rank;
-
-    // Initialise MPI environment
-    MPI_Init(&argc,&argv);
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &numtasks);
+    printf("\nExecution time middle: %.2f ms\n", (omp_get_wtime() - start_time) * 1e3);
 
     std::size_t const size = bodies.size() / numtasks;
 
-    double start_time = omp_get_wtime();
+    start_time = omp_get_wtime();
 
     std::vector<Particle> bodies_part(bodies.begin() + size*rank, bodies.begin() + size*(rank+1));
     printf("\nBodies_part Size: %zu", bodies_part.size());
-    printf ("\nNumber of MPI tasks: %d, My rank: %d, Tid: %d", numtasks, rank, omp_get_thread_num());
+    // printf ("\nNumber of MPI tasks: %d, My rank: %d, Tid: %d", numtasks, rank, omp_get_thread_num());
 
     for (int iteration = 0; iteration < maxIteration; ++iteration)
     {
+        printf("\niteration: %d", iteration);
         ComputeForces(bodies_part, gTerm, deltaT, num_threads);
         MoveBodies(bodies_part, deltaT, num_threads);
 
@@ -256,35 +266,33 @@ int main(int argc, char **argv)
             floats.push_back(value.Velocity.Element[1]);
         }
 
-        if (rank != 0) {
-            MPI_Send(&floats.front(), bodies_part.size()*9, MPI_FLOAT, 0, rank, MPI_COMM_WORLD);
+        rc = MPI_Send(&floats.front(), 1, MPI_FLOAT, 0, rank, MPI_COMM_WORLD);
+        if (rc != MPI_SUCCESS)
+        {
+            printf ("Error send MPI program. Terminating.\n");
+            MPI_Abort(MPI_COMM_WORLD, rc);
         }
 
-        MPI_Barrier(MPI_COMM_WORLD);
+        rc = MPI_Barrier(MPI_COMM_WORLD);
+        if (rc != MPI_SUCCESS)
+        {
+            printf ("Error in Barrier 2 MPI program. Terminating.\n");
+            MPI_Abort(MPI_COMM_WORLD, rc);
+        }
 
         if (rank == 0) {
             bodies.clear();
             for (int j = 0; j < numtasks; j++) {
-                if (j == 0) {
-                    for (int i = 0; i < bodies_part.size(); i++) {
-                        Particle particle;
-                        particle.Mass = floats[0 + i*9];
-                        particle.Position.X = floats[1+ i*9];
-                        particle.Position.Y = floats[2+ i*9];
-                        particle.Position.Element[0] = floats[3+ i*9];
-                        particle.Position.Element[1] = floats[4+ i*9];
-                        particle.Velocity.X = floats[5+ i*9];
-                        particle.Velocity.Y = floats[6+ i*9];
-                        particle.Velocity.Element[0] = floats[7+ i*9];
-                        particle.Velocity.Element[1] = floats[8+ i*9];
-                        bodies.push_back(particle);
-                    }
-                    continue;
-                }
-                std::vector<float> buffer(size*9);
+                std::vector<float> buffer(bodies_part.size()*9);
                 MPI_Status status;
-                MPI_Recv(&buffer.front(), bodies_part.size()*9, MPI_FLOAT, j,  j, MPI_COMM_WORLD, &status);
-                for (int i = 0; i < size; i++) {
+                rc = MPI_Recv(&buffer.front(), 1, MPI_FLOAT, j,  j, MPI_COMM_WORLD, &status);
+                if (rc != MPI_SUCCESS)
+                {
+                    printf ("Error receive MPI program. Terminating.\n");
+                    MPI_Abort(MPI_COMM_WORLD, rc);
+                }
+
+                for (int i = 0; i < bodies_part.size(); i++) {
                     Particle particle;
                     particle.Mass = buffer[0 + i*9];
                     particle.Position.X = buffer[1+ i*9];
@@ -299,6 +307,7 @@ int main(int argc, char **argv)
                 }
             }
         }
+        floats.clear();
 
         if (enable_output and rank == 0) {
             fileOutput.str(std::string());
@@ -307,8 +316,18 @@ int main(int argc, char **argv)
         }
     }
 
-    MPI_Barrier(MPI_COMM_WORLD);
-    MPI_Finalize();
+    rc = MPI_Barrier(MPI_COMM_WORLD);
+    if (rc != MPI_SUCCESS)
+    {
+        printf ("Error in last Barrier MPI program. Terminating.\n");
+        MPI_Abort(MPI_COMM_WORLD, rc);
+    }
+    rc = MPI_Finalize();
+    if (rc != MPI_SUCCESS)
+    {
+        printf ("Error in Finalize MPI program. Terminating.\n");
+        MPI_Abort(MPI_COMM_WORLD, rc);
+    }
 
     printf("\nExecution time: %.2f ms\n", (omp_get_wtime() - start_time) * 1e3);
     return 0;
